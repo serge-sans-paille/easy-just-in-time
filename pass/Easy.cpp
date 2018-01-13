@@ -7,6 +7,9 @@
 
 #include <llvm/IR/LegacyPassManager.h>
 
+#include <llvm/Analysis/AliasAnalysis.h>
+#include "llvm/InitializePasses.h"
+
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <llvm/Transforms/Utils/CtorUtils.h>
@@ -35,7 +38,14 @@ namespace easy {
     static char ID;
 
     RegisterBitcode()
-      : ModulePass(ID) { };
+      : ModulePass(ID) {
+        auto &Registry = *PassRegistry::getPassRegistry();
+        initializeAAResultsWrapperPassPass(Registry);
+      };
+
+    void getAnalysisUsage(AnalysisUsage &AU) const override {
+      AU.addRequired<AAResultsWrapperPass>();
+    }
 
     bool runOnModule(Module &M) override {
 
@@ -76,7 +86,7 @@ namespace easy {
       return Funs;
     }
 
-    static void collectFunctionsToJIT(Module &M, SmallVectorImpl<GlobalValue*> &FunsToJIT) {
+    void collectFunctionsToJIT(Module &M, SmallVectorImpl<GlobalValue*> &FunsToJIT) {
 
       // get **all** functions passed as parameter to easy jit calls
       //   not only the target function, but also its parameters
@@ -104,12 +114,21 @@ namespace easy {
       }
     }
 
-    static void deduceFunctionsToJIT(Module &M) {
+    void deduceFunctionsToJIT(Module &M) {
       for(Function &EasyJitFun : compilerInterface(M)) {
         for(User* U : EasyJitFun.users()) {
+
           if(CallSite CS{U}) {
+            auto& AAP = getAnalysis<AAResultsWrapperPass>();
+            AAP.runOnFunction(*CS.getParent()->getParent());
+            auto& AA = AAP.getAAResults();
             for(Value* O : CS.args()) {
               O = O->stripPointerCastsNoFollowAliases();
+              for(GlobalValue& G: M.global_values()) {
+                AliasResult Result = AA.alias(O, &G);
+                if(Result != NoAlias) errs() << "may alias: " << G.getName() << "\n";
+
+              }
               if(Function* GV = dyn_cast<Function>(O)) {
                 GV->setSection(JIT_SECTION);
               }
@@ -375,4 +394,3 @@ namespace easy {
     return new RegisterBitcode();
   }
 }
-
